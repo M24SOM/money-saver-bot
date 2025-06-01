@@ -6,6 +6,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 import secrets
+from telegram import BotCommand
 
 load_dotenv()
 
@@ -26,6 +27,18 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
 def start_health_server():
     server = HTTPServer(("0.0.0.0", 8000), HealthCheckHandler)
     server.serve_forever()
+
+
+async def set_bot_commands(application):
+    commands = [
+        BotCommand("start", "Start the bot"),
+        BotCommand("save", "Save money (e.g., /save 50)"),
+        BotCommand("withdraw", "Withdraw money (e.g., /withdraw 20)"),
+        BotCommand("status", "Check your points and title"),
+        BotCommand("clear", "Clear all transactions and reset"),
+        BotCommand("help", "Show command guide"),
+    ]
+    await application.bot.set_my_commands(commands)
 
 # --- Bot Logic ---
 def register_user(telegram_id, name):
@@ -123,14 +136,83 @@ def get_title(points):
     else:
         return "Keep Up"
 
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "👋 Welcome to the Money Saving Game Bot!\n\n"
+        "Here’s how to get started:\n"
+        "💰 /save 50 — Save $50 (and earn points)\n"
+        "❌ /withdraw 30 — Withdraw $30 (lose points)\n"
+        "📊 /status — Check your current points and rank\n"
+        "🧹 /clear — Clear all your transactions and reset points\n\n"
+        "Start saving and climb the financial ladder! 💸🔥"
+    )
+
+
+async def clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    
+    # Get the user record
+    res = requests.get(
+        f"{POCKETBASE_URL}/api/collections/users/records",
+        params={"filter": f"telegram_id='{user_id}'"}
+    ).json()
+    
+    if not res['items']:
+        await update.message.reply_text("❌ You are not registered yet. Use /save to start saving!")
+        return
+    
+    user = res['items'][0]
+    user_record_id = user['id']
+    
+    # Delete all transactions for this user
+    txns_res = requests.get(
+        f"{POCKETBASE_URL}/api/collections/transactions/records",
+        params={"filter": f"user_id='{user_record_id}'"}
+    ).json()
+    
+    for txn in txns_res.get('items', []):
+        requests.delete(f"{POCKETBASE_URL}/api/collections/transactions/records/{txn['id']}")
+    
+    # Reset user points to 0
+    requests.patch(
+        f"{POCKETBASE_URL}/api/collections/users/records/{user_record_id}",
+        json={"points": 0}
+    )
+    
+    await update.message.reply_text("🧹 All transactions cleared and your points have been reset to 0.")
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "📚 Available Commands:\n"
+        "/save [amount] — Save money\n"
+        "/withdraw [amount] — Withdraw money\n"
+        "/status — Check your savings progress\n"
+        "/clear — Reset your account\n"
+        "/start — Get started guide\n"
+    )
+
+async def post_init(application):
+    await application.bot.set_my_commands([
+        BotCommand("start", "Start the bot"),
+        BotCommand("save", "Save money"),
+        BotCommand("withdraw", "Withdraw money"),
+        BotCommand("status", "Check your status"),
+        BotCommand("clear", "Clear all data"),
+        BotCommand("help", "Show help menu"),
+    ])
 
 def main():
     threading.Thread(target=start_health_server, daemon=True).start()
 
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
+
+    app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("save", save))
     app.add_handler(CommandHandler("withdraw", withdraw))
     app.add_handler(CommandHandler("status", status))
+    app.add_handler(CommandHandler("clear", clear))
+    app.add_handler(CommandHandler("help", help_command))
+
     app.run_polling()
 
 if __name__ == "__main__":
